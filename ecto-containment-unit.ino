@@ -3,8 +3,13 @@
 #include <AltSoftSerial.h>    // Arduino build environment requires this
 #include <wavTrigger.h>
 #include <ezButton.h>
+#include <ServoTimer2.h>
+
+ServoTimer2 servo;
+int servoPin = 17;
 
 /*** Variables ***/
+// Buttons
 #define RED_LED_PIN 2
 #define RED_BUTTON_PIN 3
 #define YELLOW_LED_PIN 4
@@ -13,7 +18,7 @@
 
 // Trap
 ezButton TRAP_TRIGGER(7);
-//#define TRAP_SMOKER 8
+#define TRAP_SMOKER 8
 
 // Main Lever
 #define MAIN_LEVER 10
@@ -21,10 +26,9 @@ ezButton TRAP_TRIGGER(7);
 // Cutoff Process
 ezButton CUTOFF_LEVER(11);
 #define CUTOFF_SMOKER 12
+#define VENT_SERVO 18
 #define VENT_FAN 19
-#define VENT_SERVO 21
 #define VENT_LIGHT 22
-
 
 // Top LEDS
 #define TOP_GREEN_LED 13
@@ -33,34 +37,36 @@ ezButton CUTOFF_LEVER(11);
 // Needle Gauge Meter
 #define NEEDLE_GAUGE 15
 
-int gRateOffset = 0;         // WAV Trigger sample-rate offset
-
-// Generic print flag
-int printFlag;
+// Generic trap flag
+int trapFlag = 0x00;
 
 /*** Wav Trigger Setup ***/
 wavTrigger wTrig; // Our WAV Trigger object
 
 // Variables will change:
-int fanState = LOW;  // ledState used to set the LED
+int fanState = LOW;
+int ledState = LOW;
 
-// Generally, you should use "unsigned long" for variables that hold time
-// The value will quickly become too large for an int to store
-unsigned long previousMillis = 0;  // will store last time LED was updated
+// will store last time LED was updated
+unsigned long previousMillis = 0;
 
 // constants won't change:
-const long interval = 12000;  // interval at which to blink (milliseconds)
-
-int count = 0; 
+const long interval = 10500;
+unsigned long currentMillis;
+int count = 0;
+bool shutdownstate = 0; 
 
 void setup() {
 
   // Serial monitor
   Serial.begin(9600);
 
+  servo.attach(servoPin);
+  servo.write(750);
+
   TRAP_TRIGGER.setDebounceTime(50);
   CUTOFF_LEVER.setDebounceTime(50);
-
+  
   // LED and Button Prep
   pinMode(RED_LED_PIN, OUTPUT);
   pinMode(RED_BUTTON_PIN, INPUT);
@@ -68,8 +74,6 @@ void setup() {
   pinMode(YELLOW_BUTTON_PIN, INPUT);
   pinMode(GREEN_LED_PIN, OUTPUT);
   pinMode(MAIN_LEVER, INPUT);
-
-//  pinMode(TRAP_TRIGGER, INPUT);
 
   digitalWrite(RED_LED_PIN, HIGH);
   digitalWrite(YELLOW_LED_PIN, HIGH);
@@ -98,23 +102,20 @@ void setup() {
   wTrig.trackPlayPoly(1);               // Start Track 1
   wTrig.trackLoad(2);
   wTrig.update();                       // Wait 2 secs
-  delay(10000);
+  delay(8000);
   wTrig.trackPlayPoly(2);               // Start Containment Unit constant hum
+  wTrig.trackFade(1, -40, 2000, 0);       // Fade Track 1 down to -40dB over 2 secs
   wTrig.trackFade(2, 0, 2000, 0);       // Fade Track 2 up to 0dB over 2 secs
   wTrig.update();                       // Wait 2 secs
   wTrig.trackLoop(2, 1);                // Start hum loop
+  Serial.println("ECU Ready");
 }
 
 void loop() {
+  
   TRAP_TRIGGER.loop();
   CUTOFF_LEVER.loop();
-
-  if(CUTOFF_LEVER.isPressed())
-    Serial.println("The button is pressed");
-
-  if(CUTOFF_LEVER.isReleased())
-    Serial.println("The button is released");
-
+  
   /*** System Status ***/
   static enum {
     READY,
@@ -123,16 +124,32 @@ void loop() {
     RED_BTN_PUSH,
     YELLOW_BTN_PREP,
     YELLOW_BTN_PUSH,
-    GREEN_BTN_PREP,
-    GREEN_BTN_PUSH,
+    LEVER_PREP,
+    LEVER_PUSH,
     TRAP_CLEAN,
     CUT_OFF_LEVER,
-    ECU_OFF
+    ECU_OFF,
+    STAND_BY
   } state = READY;
+
+  if(CUTOFF_LEVER.isPressed()) {
+    // Lever is pulled back up
+  }
+
+  if(CUTOFF_LEVER.isReleased()) {
+    // Lever is pulled down
+    shutDown();
+    state = CUT_OFF_LEVER;
+    Serial.println("SHUTDOWN START");
+  }
 
   switch (state) {
     case READY:
-
+      if (digitalRead(servoPin) == LOW) {
+        servo.write(750);
+      }
+      wTrig.masterGain(0);
+      
       digitalWrite(RED_LED_PIN, LOW);
       digitalWrite(YELLOW_LED_PIN, LOW);
 
@@ -141,65 +158,31 @@ void loop() {
 
       digitalWrite(GREEN_LED_PIN, HIGH);
 
-      if (printFlag == 0x00) {
-        Serial.print("Ecto Containment Unit Ready!");
-        Serial.print("\r\n");
-        Serial.print("\r\n");
-        Serial.print("It's simple really. Loaded trap here.");
-        Serial.print("\r\n");
-        Serial.print("\r\n");
-        Serial.print("Open, unlock the System.");
-        Serial.print("\r\n");
-        Serial.print("\r\n");
-        //      Serial.print(digitalRead(TRAP_TRIGGER));
-        //      Serial.print(digitalRead(RED_LED_PIN));
-        //      Serial.print(digitalRead(YELLOW_LED_PIN));
-        //      Serial.print(digitalRead(RED_BUTTON_PIN));
-        printFlag = 0x01;
-      }
-
-      if (CUTOFF_LEVER.isReleased()) {
-        shutDown();
-        state = CUT_OFF_LEVER;
-      }
-
       if (TRAP_TRIGGER.isReleased()) {
-        Serial.print("Insert the trap.");
-        Serial.print("\r\n");
-        Serial.print("\r\n");
         digitalWrite(GREEN_LED_PIN, LOW);
         wTrig.trackLoad(4);
         wTrig.update(); 
-        Serial.print("Release.");
-        Serial.print("\r\n");
-        Serial.print("\r\n");
         state = TRAP_INSERT;
       }
 
       break;
+    // This the trap insert sound. Once the trap is inserted,
+    // the system is ready to go.
     case TRAP_INSERT:
       if (TRAP_TRIGGER.getState() == HIGH) {
-        wTrig.trackPlayPoly(4);               // Start trap insert sound
+        wTrig.trackPlayPoly(4); // Start trap insert sound
         wTrig.update(); 
-        Serial.print("Close...");
-        Serial.print("\r\n");
-        Serial.print("\r\n");
         digitalWrite(TOP_GREEN_LED, LOW);
         digitalWrite(TOP_RED_LED, HIGH);
         state = RED_BTN_PREP;
       }
       break;
+    // Press the red button to start the ECU process  
     case RED_BTN_PREP:
       if (digitalRead(RED_BUTTON_PIN) == LOW) {
-        if (printFlag == 0x01) {
-          Serial.println("....Lock the System.");
-          Serial.print("\r\n");
-          Serial.print("\r\n");
-          printFlag = 0x00;
-        }
+
       }
-      if (CUTOFF_LEVER.isReleased()) {
-        shutDown();  
+      if (CUTOFF_LEVER.isReleased()) { 
         state = CUT_OFF_LEVER;
       }
       if (digitalRead(RED_BUTTON_PIN) == HIGH) {
@@ -207,35 +190,27 @@ void loop() {
         state = RED_BTN_PUSH;
       }
       break;
+    // Once the red button is pressed, prep the yellow button 
     case RED_BTN_PUSH:
       if (digitalRead(RED_BUTTON_PIN) == HIGH) {
         digitalWrite(RED_LED_PIN, HIGH);
-        Serial.println("Set your entry grid.");
         wTrig.trackFade(2, -10, 1000, 0);
         wTrig.trackGain(7, 5);
         wTrig.trackPlayPoly(7);
         wTrig.trackLoad(8);
         wTrig.update(); 
-        Serial.print("\r\n");
-        Serial.print("\r\n");
         state = YELLOW_BTN_PREP;
       }
       break;
+    // Continue on to press the yellow button
     case YELLOW_BTN_PREP:
       if (digitalRead(RED_BUTTON_PIN) == HIGH) {
-        if (printFlag == 0x01) {
-          printFlag = 0x00;
-        }
         state = YELLOW_BTN_PUSH;
       }
       break;
+    // Once the yellow button is pressed, 
     case YELLOW_BTN_PUSH:
-      if (CUTOFF_LEVER.isReleased()) {
-        shutDown();  
-        state = CUT_OFF_LEVER;
-      }
       if (digitalRead(YELLOW_BUTTON_PIN) == HIGH) {
-        Serial.println("Neutralize your field");
         wTrig.trackFade(2, -40, 500, 0);
         wTrig.trackFade(7, -40, 500, 0);
         wTrig.trackStop(7);
@@ -245,27 +220,22 @@ void loop() {
         wTrig.update(); 
         digitalWrite(RED_LED_PIN, LOW);
         digitalWrite(YELLOW_LED_PIN, HIGH);
-        Serial.print("\r\n");
-        Serial.print("\r\n");
-        state = GREEN_BTN_PREP;
+        state = LEVER_PREP;
       }
-
       break;
-    case GREEN_BTN_PREP:
+    // The lever is ready to be pulled down
+    case LEVER_PREP:
       if (digitalRead(YELLOW_BUTTON_PIN) == HIGH) {
-        state = GREEN_BTN_PUSH;
+        state = LEVER_PUSH;
         wTrig.trackLoad(3);
       }
       break;
-    case GREEN_BTN_PUSH:
+    // The lever has been pulled down
+    case LEVER_PUSH:
       if (CUTOFF_LEVER.isReleased()) {
-        shutDown();  
         state = CUT_OFF_LEVER;
       }
       if (digitalRead(MAIN_LEVER) == HIGH) {
-        Serial.println("And....");
-        Serial.print("\r\n");
-        Serial.print("\r\n");
         wTrig.trackStop(8);
         wTrig.trackStop(7);
         wTrig.update();
@@ -273,22 +243,18 @@ void loop() {
       }
 
       break;
+    // The trap is clean and the system has reset
     case TRAP_CLEAN:
-      if (printFlag == 0x00) {
+      if (trapFlag == 0x00) {
         wTrig.trackFade(2, 0, 1000, 0);
         wTrig.trackGain(3, 10); 
         wTrig.trackPlayPoly(3);
         wTrig.update();
-        Serial.println("THE LIGHT IS GREEN, TRAP IS CLEAN!");
-        Serial.print("\r\n");
-        Serial.print("\r\n");
-        Serial.print("Remove Clean Trap.");
-        Serial.print("\r\n");
-        Serial.print("\r\n");
-        printFlag = 0x01;
+        trapFlag = 0x01;
       }
 
-      if (digitalRead(MAIN_LEVER) == HIGH) {
+      // The Main lever must be pulled back up to reset the system
+      if (digitalRead(MAIN_LEVER) == LOW) {
         digitalWrite(YELLOW_LED_PIN, LOW);
         digitalWrite(RED_LED_PIN, LOW);
 //        digitalWrite(TRAP_TRIGGER, LOW);
@@ -299,58 +265,107 @@ void loop() {
       }
 
       break;
+    // This is the start of the shutdown process. You can
+    // get to this step from anywhere in the process.
     case CUT_OFF_LEVER:
-        unsigned long currentMillis = millis();
-        int buttonstate = 0;
-        if (buttonstate == 0) {
-
+        if (shutdownstate == 0) {
+          
           digitalWrite(GREEN_LED_PIN, LOW);
           digitalWrite(RED_LED_PIN, HIGH);
           digitalWrite(TOP_RED_LED, HIGH);
-           
+          
           if (currentMillis - previousMillis >= interval) {
-            digitalWrite(VENT_FAN, LOW);
             count++;
             previousMillis = currentMillis;
-
-            if (count == 2) {
-              digitalWrite(VENT_FAN, HIGH);
-            } else if (count == 3) {
-              digitalWrite(VENT_FAN, LOW);
-              state = ECU_OFF;
-            }
           }
-          buttonstate = 1;
-        } else {
-          
-          buttonstate = 0;
-        
         }
-
+      switch (count) {
+        case 0:
+          // Run the vent smoker
+          currentMillis = millis();
+          break;            
+        case 1:
+          currentMillis = millis();
+          break;
+        case 2:
+          // Turn the smoker off
+          // Open the Vent
+          if (digitalRead(servoPin) == LOW) {
+            servo.write(1500);
+          }
+          // Turn the fan on
+          Serial.println("SHUT DOWN 2");
+          digitalWrite(VENT_FAN, HIGH);
+          currentMillis = millis();
+          break;
+        case 3:
+          Serial.println("SHUT DOWN 3");
+          currentMillis = millis();
+          
+          // Turn the fan off but leave vent open
+          digitalWrite(VENT_FAN, LOW);
+          wTrig.trackFade(11, -40, 1000, 0);
+          break;
+        case 4:
+          Serial.println("SHUT DOWN 4");
+          currentMillis = millis();
+          shutdownstate = 1;
+          break;
+     }      
+      if(shutdownstate == 1) {
+        state = ECU_OFF;
+        wTrig.trackLoad(1);          
+        wTrig.trackLoad(2);               // Start Containment Unit constant hum
+        wTrig.trackLoad(9);
+        wTrig.trackLoad(10);
+        wTrig.trackGain(1, 0);
+        wTrig.trackGain(2, -40);
+        wTrig.trackGain(9, -30);
+        wTrig.trackGain(10, -30);
+      }
       break;
     case ECU_OFF:
-      Serial.print("ECU SHUTDOWN");
-      if(CUTOFF_LEVER.getState() == LOW){
-        Serial.print("COMING ONLINE");
-      } else {
-        Serial.print("ECU SHUTDOWN");
+      Serial.println("ECU IS OFF");
+      currentMillis = millis();
+      
+      // Flash red button and play click
+      if (currentMillis - previousMillis >= 600) {
+        previousMillis = currentMillis;
+        if (ledState == LOW) {
+          ledState = HIGH;
+          wTrig.trackPlayPoly(9);
+        } else {
+          ledState = LOW;
+          wTrig.trackPlayPoly(10);
+        }
+        digitalWrite(RED_LED_PIN, ledState);
       }
-      if (CUTOFF_LEVER.getState() == LOW) {
-        wTrig.trackPlayPoly(2);               // Start Containment Unit constant hum
-        wTrig.trackFade(2, 0, 7000, 0);       // Fade Track 2 up to 0dB over 2 secs
+      
+      // If maincut off lever is back up, system will reset.
+      if(CUTOFF_LEVER.isPressed()) {
+        wTrig.trackPlayPoly(1);
+        wTrig.update();
+        wTrig.trackPlayPoly(2);
+        wTrig.trackFade(2, 0, 5000, 0);       // Fade Track 2 up to 0dB over 7 secs
         wTrig.update();                       // Wait 2 secs
-        wTrig.trackLoop(2, 1); 
+        wTrig.trackLoop(2, 1);
+        shutdownstate = 0;
         count = 0;
+        trapFlag = 0x00;
         state = READY;
-      }      
+      }
       break;
   }
 }
 
 void shutDown() {
+  // Shutdown sequence sounds
   wTrig.stopAllTracks();
   wTrig.update();
-  wTrig.trackLoad(5);    
-  wTrig.trackGain(5, 10); 
+  wTrig.trackLoad(5); 
+  wTrig.trackLoad(11);
+  wTrig.trackGain(5, 10);
+  wTrig.trackGain(11, 10); 
   wTrig.trackPlayPoly(5);
+  wTrig.trackPlayPoly(11);
 }
