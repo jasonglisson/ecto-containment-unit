@@ -5,8 +5,12 @@
 #include <ezButton.h>
 #include <ServoTimer2.h>
 
+// Audio connections are:
+// D9 to WavTrigger RX
+// D8 to WavTrigger TX
+
 ServoTimer2 servo;
-int servoPin = 17;
+int servoPin = 16; // A2
 
 /*** Variables ***/
 // Buttons
@@ -18,24 +22,26 @@ int servoPin = 17;
 
 // Trap
 ezButton TRAP_TRIGGER(7);
-#define TRAP_SMOKER 8
+#define TRAP_PUMP 12
+#define TRAP_SMOKER 11
 
 // Main Lever
-#define MAIN_LEVER 10
+#define MAIN_LEVER 15
 
 // Cutoff Process
 ezButton CUTOFF_LEVER(11);
-#define CUTOFF_SMOKER 12
-#define VENT_SERVO 18
-#define VENT_FAN 19
-#define VENT_LIGHT 22
+#define VENT_SMOKER 17 // A3
+#define CUTOFF_PUMP 18 // A4
+#define VENT_FAN_LIGHT 19 // A5
 
 // Top LEDS
-#define TOP_GREEN_LED 13
-#define TOP_RED_LED 14
+#define TOP_GREEN_LED 14 // A0
+#define TOP_RED_LED 13
 
 // Needle Gauge Meter
-#define NEEDLE_GAUGE 15
+#define NEEDLE_GAUGE 10
+unsigned long NEEDLEpreviousMillis = 0;
+unsigned long NEEDLEcurrentMillis;
 
 // Generic trap flag
 int trapFlag = 0x00;
@@ -46,13 +52,17 @@ wavTrigger wTrig; // Our WAV Trigger object
 // Variables will change:
 int fanState = LOW;
 int ledState = LOW;
+int needleState = LOW;
+int topRedLEDState = LOW;
 
 // will store last time LED was updated
 unsigned long previousMillis = 0;
+unsigned long REDTOPpreviousMillis = 0;
 
 // constants won't change:
 const long interval = 10500;
 unsigned long currentMillis;
+unsigned long REDTOPcurrentMillis;
 int count = 0;
 bool shutdownstate = 0; 
 
@@ -74,7 +84,8 @@ void setup() {
   pinMode(YELLOW_BUTTON_PIN, INPUT);
   pinMode(GREEN_LED_PIN, OUTPUT);
   pinMode(MAIN_LEVER, INPUT);
-
+  pinMode(NEEDLE_GAUGE, OUTPUT);
+  
   digitalWrite(RED_LED_PIN, HIGH);
   digitalWrite(YELLOW_LED_PIN, HIGH);
   digitalWrite(GREEN_LED_PIN, HIGH);
@@ -85,8 +96,13 @@ void setup() {
   digitalWrite(TOP_GREEN_LED, HIGH);
   digitalWrite(TOP_RED_LED, HIGH);
 
-  pinMode(VENT_FAN, OUTPUT);
-  digitalWrite(VENT_FAN, LOW);
+  pinMode(VENT_FAN_LIGHT, OUTPUT);
+  digitalWrite(VENT_FAN_LIGHT, LOW);
+  pinMode(CUTOFF_PUMP, OUTPUT);
+  digitalWrite(CUTOFF_PUMP, HIGH);
+
+  pinMode(TRAP_PUMP, OUTPUT);
+  digitalWrite(TRAP_PUMP, HIGH);
 
   // WAV Trigger startup at 57600
   wTrig.start();
@@ -153,11 +169,16 @@ void loop() {
       digitalWrite(RED_LED_PIN, LOW);
       digitalWrite(YELLOW_LED_PIN, LOW);
 
+      digitalWrite(NEEDLE_GAUGE, HIGH);
+
       digitalWrite(TOP_GREEN_LED, HIGH);
       digitalWrite(TOP_RED_LED, LOW);
 
       digitalWrite(GREEN_LED_PIN, HIGH);
 
+      digitalWrite(CUTOFF_PUMP, LOW);
+      digitalWrite(TRAP_PUMP, LOW);
+      Serial.println(TRAP_PUMP);
       if (TRAP_TRIGGER.isReleased()) {
         digitalWrite(GREEN_LED_PIN, LOW);
         wTrig.trackLoad(4);
@@ -170,15 +191,19 @@ void loop() {
     // the system is ready to go.
     case TRAP_INSERT:
       if (TRAP_TRIGGER.getState() == HIGH) {
+
         wTrig.trackPlayPoly(4); // Start trap insert sound
         wTrig.update(); 
         digitalWrite(TOP_GREEN_LED, LOW);
         digitalWrite(TOP_RED_LED, HIGH);
+        digitalWrite(TRAP_PUMP, HIGH);
+        delay(3000);
         state = RED_BTN_PREP;
       }
       break;
     // Press the red button to start the ECU process  
     case RED_BTN_PREP:
+      digitalWrite(TRAP_PUMP, LOW);
       if (digitalRead(RED_BUTTON_PIN) == LOW) {
 
       }
@@ -272,30 +297,60 @@ void loop() {
           
           digitalWrite(GREEN_LED_PIN, LOW);
           digitalWrite(RED_LED_PIN, HIGH);
-          digitalWrite(TOP_RED_LED, HIGH);
+          digitalWrite(TOP_GREEN_LED, LOW);
+
+
+          unsigned long NEEDLEcurrentMillis = millis();
+      
+          if (NEEDLEcurrentMillis - NEEDLEpreviousMillis >= 100) {
+          // save the last time you blinked the LED
+          NEEDLEpreviousMillis = NEEDLEcurrentMillis;
+      
+            // if the LED is off turn it on and vice-versa:
+            if (needleState == LOW) {
+              needleState = HIGH;
+            } else {
+              needleState = LOW;
+            }
+            digitalWrite(NEEDLE_GAUGE, needleState);
+          }
+      
+
+          REDTOPcurrentMillis = millis();
+          
+          if (REDTOPcurrentMillis - REDTOPpreviousMillis >= 515) {
+            REDTOPpreviousMillis = REDTOPcurrentMillis;
+            if (topRedLEDState == LOW) {
+              topRedLEDState = HIGH;
+            } else {
+              topRedLEDState = LOW;
+            }
+            digitalWrite(TOP_RED_LED, topRedLEDState); 
+          }
           
           if (currentMillis - previousMillis >= interval) {
-            count++;
+            count++;       
             previousMillis = currentMillis;
           }
         }
       switch (count) {
         case 0:
-          // Run the vent smoker
+          // Run the vent PUMP
+          digitalWrite(CUTOFF_PUMP, HIGH);
           currentMillis = millis();
           break;            
         case 1:
           currentMillis = millis();
           break;
         case 2:
-          // Turn the smoker off
+          // Turn the PUMP off
           // Open the Vent
           if (digitalRead(servoPin) == LOW) {
             servo.write(1500);
           }
           // Turn the fan on
           Serial.println("SHUT DOWN 2");
-          digitalWrite(VENT_FAN, HIGH);
+          digitalWrite(VENT_FAN_LIGHT, HIGH);
           currentMillis = millis();
           break;
         case 3:
@@ -303,7 +358,8 @@ void loop() {
           currentMillis = millis();
           
           // Turn the fan off but leave vent open
-          digitalWrite(VENT_FAN, LOW);
+          digitalWrite(VENT_FAN_LIGHT, LOW);
+          digitalWrite(CUTOFF_PUMP, LOW);
           wTrig.trackFade(11, -40, 1000, 0);
           break;
         case 4:
@@ -326,8 +382,12 @@ void loop() {
       break;
     case ECU_OFF:
       Serial.println("ECU IS OFF");
-      currentMillis = millis();
       
+      digitalWrite(TOP_RED_LED, LOW);
+      digitalWrite(NEEDLE_GAUGE, LOW);
+
+      currentMillis = millis();
+             
       // Flash red button and play click
       if (currentMillis - previousMillis >= 600) {
         previousMillis = currentMillis;
